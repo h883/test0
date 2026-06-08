@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D コインダッシュ - P2P 対戦</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; font-family: "Segoe UI", sans-serif; color:#fff; }
+  #ui { position: fixed; top: 12px; left: 12px; z-index: 10; text-shadow: 0 2px 6px rgba(0,0,0,.6); user-select: none; }
+  #ui h1 { margin: 0 0 4px; font-size: 16px; letter-spacing: 1px; }
+  #stats { font-size: 20px; font-weight: bold; }
+  #conn { font-size: 12px; opacity:.8; margin-top:4px; }
+  #hint { font-size: 12px; opacity: .8; margin-top: 6px; }
+  #overlay { position: fixed; inset: 0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    z-index: 20; background: rgba(5,8,20,.9); text-align:center; padding:20px; box-sizing:border-box; }
+  #overlay.hidden { display: none; }
+  #overlay h2 { font-size: 30px; margin: 0 0 6px; }
+  .panel { background:#121a35; border:1px solid #2a3a66; border-radius:12px; padding:16px; max-width:560px; width:100%; margin-top:14px; }
+  textarea { width:100%; height:70px; box-sizing:border-box; background:#0a1330; color:#9fd; border:1px solid #2a3a66;
+    border-radius:8px; font-size:11px; resize:none; margin-top:6px; }
+  button { padding:10px 22px; font-size:15px; cursor:pointer; border:none; border-radius:24px; color:#06122a;
+    font-weight:bold; background: linear-gradient(135deg,#ffd86b,#ff9f43); margin:6px 4px; }
+  button.sec { background:linear-gradient(135deg,#7fd6ff,#4f9fff); }
+  button:active { transform: scale(.96); }
+  .row { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+  label { font-size:12px; opacity:.85; display:block; text-align:left; margin-top:10px; }
+  .step { display:none; }
+  .step.on { display:block; }
+  small { opacity:.7; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>🪙 3D コインダッシュ — P2P 対戦</h1>
+  <div id="stats">YOU: 0 &nbsp; | &nbsp; RIVAL: 0</div>
+  <div id="conn">未接続</div>
+  <div id="hint">移動: A/D ←→　　ジャンプ: Space</div>
+</div>
+
+<div id="overlay">
+  <h2>P2P 対戦をセットアップ</h2>
+  <small>サーバー不要。WebRTC でブラウザ同士を直接つなぎます。<br>2人で同じ画面の手順を交互に行ってください。</small>
+
+  <div class="row" id="role">
+    <button id="beHost">① ホストになる</button>
+    <button class="sec" id="beGuest">② ゲストになる（招待を受ける）</button>
+  </div>
+
+  <!-- HOST flow -->
+  <div class="panel step" id="hostStep">
+    <label>1. この「招待コード」を相手に送る:</label>
+    <textarea id="hostOffer" readonly placeholder="生成中..."></textarea>
+    <label>2. 相手から返ってきた「応答コード」を貼り付け:</label>
+    <textarea id="hostAnswer" placeholder="相手の応答コードをここに貼る"></textarea>
+    <div class="row"><button id="hostConnect">接続する</button></div>
+  </div>
+
+  <!-- GUEST flow -->
+  <div class="panel step" id="guestStep">
+    <label>1. ホストの「招待コード」を貼り付け:</label>
+    <textarea id="guestOffer" placeholder="ホストの招待コードをここに貼る"></textarea>
+    <div class="row"><button id="guestGen">応答コードを作る</button></div>
+    <label>2. できた「応答コード」を相手に送り返す:</label>
+    <textarea id="guestAnswer" readonly placeholder="上のボタンを押すと生成"></textarea>
+  </div>
+
+  <div class="panel step" id="readyStep">
+    <h2 id="readyTitle">接続完了！</h2>
+    <p id="readyMsg">スタートで対戦開始。60秒でコインを多く集めた方が勝ち！</p>
+    <button id="startBtn">スタート</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+/* ---------- THREE setup ---------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1020);
+scene.fog = new THREE.Fog(0x0b1020, 20, 60);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 6.5, 12); camera.lookAt(0,1,-6);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0x88aaff, 0x223044, .9));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+dir.position.set(6,14,8); dir.castShadow = true;
+dir.shadow.mapSize.set(1024,1024);
+Object.assign(dir.shadow.camera,{left:-20,right:20,top:20,bottom:-20});
+scene.add(dir);
+
+const LANE = 9;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(LANE,200),
+  new THREE.MeshStandardMaterial({color:0x1c2748, roughness:.95}));
+ground.rotation.x = -Math.PI/2; ground.position.z = -80; ground.receiveShadow = true;
+scene.add(ground);
+for (let s=-1;s<=1;s+=2){
+  const e = new THREE.Mesh(new THREE.BoxGeometry(.25,.5,200),
+    new THREE.MeshStandardMaterial({color:0x3a4f8a, emissive:0x14224a}));
+  e.position.set(s*LANE/2,.25,-80); scene.add(e);
+}
+
+function makePlayer(color, emissive){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1,1,1),
+    new THREE.MeshStandardMaterial({color, emissive, metalness:.3, roughness:.4}));
+  m.position.set(0,.5,0); m.castShadow = true; scene.add(m); return m;
+}
+const me = makePlayer(0x4fd1ff, 0x0a3a55);   // local = blue
+const rival = makePlayer(0xff6bd6, 0x4a0030); // remote = pink
+rival.position.x = 0;
+
+/* ---------- game state ---------- */
+let state = 'menu';            // menu | play | over
+let isHost = false, connected = false;
+let myScore = 0, rivalScore = 0;
+let velX=0, velY=0, onGround=true;
+let timeLeft = 60;
+const items = new Map();       // id -> mesh (coins/obstacles, host-authoritative)
+let nextId = 1, spawnTimer = 0, speed = 14;
+const statsEl = document.getElementById('stats');
+const connEl = document.getElementById('conn');
+
+const keys = {};
+addEventListener('keydown', e => { keys[e.code]=true; if(e.code==='Space') e.preventDefault(); });
+addEventListener('keyup', e => keys[e.code]=false);
+
+function spawnItem(id, coin, x){
+  let mesh;
+  if (coin){
+    mesh = new THREE.Mesh(new THREE.CylinderGeometry(.45,.45,.14,20),
+      new THREE.MeshStandardMaterial({color:0xffd451, emissive:0x5a4000, metalness:.6, roughness:.3}));
+    mesh.rotation.x = Math.PI/2; mesh.position.set(x,.8,-60);
+  } else {
+    mesh = new THREE.Mesh(new THREE.BoxGeometry(1.1,1.1,1.1),
+      new THREE.MeshStandardMaterial({color:0xff4d5e, emissive:0x4a0008, roughness:.5}));
+    mesh.position.set(x,.55,-60);
+  }
+  mesh.castShadow = true; mesh.userData.coin = coin; mesh.userData.id = id;
+  scene.add(mesh); items.set(id, mesh);
+}
+function removeItem(id){ const m = items.get(id); if(m){ scene.remove(m); items.delete(id);} }
+
+function updateStats(){ statsEl.textContent = `YOU: ${myScore}   |   RIVAL: ${rivalScore}   ⏱ ${Math.ceil(timeLeft)}`; }
+
+/* ---------- networking (WebRTC manual signaling) ---------- */
+let pc, dc;
+const rtcConf = { iceServers:[{urls:'stun:stun.l.google.com:19302'}] };
+
+function setupChannel(channel){
+  dc = channel;
+  dc.onopen = () => { connected = true; connEl.textContent = '接続済み ✅'; showStep('readyStep'); };
+  dc.onclose = () => { connEl.textContent = '切断されました'; };
+  dc.onmessage = e => onNet(JSON.parse(e.data));
+}
+function send(obj){ if (dc && dc.readyState==='open') dc.send(JSON.stringify(obj)); }
+
+// gather ICE then resolve full SDP (so one code contains everything)
+function waitIce(pc){
+  return new Promise(res=>{
+    if (pc.iceGatheringState==='complete') return res();
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState==='complete') res(); };
+    setTimeout(res, 2500); // fallback
+  });
+}
+const enc = o => btoa(JSON.stringify(o));
+const dec = s => JSON.parse(atob(s.trim()));
+
+async function hostCreate(){
+  isHost = true;
+  pc = new RTCPeerConnection(rtcConf);
+  setupChannel(pc.createDataChannel('game'));
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitIce(pc);
+  document.getElementById('hostOffer').value = enc(pc.localDescription);
+}
+async function hostFinish(){
+  const ans = dec(document.getElementById('hostAnswer').value);
+  await pc.setRemoteDescription(ans);
+}
+async function guestCreate(offerCode){
+  isHost = false;
+  pc = new RTCPeerConnection(rtcConf);
+  pc.ondatachannel = e => setupChannel(e.channel);
+  await pc.setRemoteDescription(dec(offerCode));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await waitIce(pc);
+  document.getElementById('guestAnswer').value = enc(pc.localDescription);
+}
+
+function onNet(msg){
+  switch(msg.t){
+    case 'pos':      // rival moved
+      rival.position.set(msg.x, msg.y, 0);
+      break;
+    case 'spawn':    // host -> guest
+      spawnItem(msg.id, msg.coin, msg.x); break;
+    case 'remove':   // host -> guest (item consumed/expired)
+      removeItem(msg.id);
+      if (msg.by === 'rival') rivalScore += 10; // host caught it
+      updateStats(); break;
+    case 'pick':     // guest -> host: guest grabbed item id
+      handleGuestPick(msg.id); break;
+    case 'score':    // authoritative score broadcast
+      myScore = (isHost? msg.host : msg.guest);
+      rivalScore = (isHost? msg.guest : msg.host);
+      updateStats(); break;
+    case 'start':    // host starts the match
+      beginMatch(msg.seedTime); break;
+    case 'over':
+      finishMatch(msg.host, msg.guest); break;
+  }
+}
+
+/* ---------- match flow ---------- */
+function beginMatch(t){
+  // clear
+  items.forEach(m=>scene.remove(m)); items.clear();
+  myScore = rivalScore = 0; nextId = 1; spawnTimer = 0; speed = 14;
+  velX=velY=0; onGround=true; me.position.set(0,.5,0);
+  timeLeft = 60; state='play'; document.getElementById('overlay').classList.add('hidden');
+  updateStats();
+}
+function finishMatch(hostScore, guestScore){
+  state='over';
+  const mine = isHost? hostScore : guestScore;
+  const theirs = isHost? guestScore : hostScore;
+  myScore = mine; rivalScore = theirs;
+  const o = document.getElementById('overlay');
+  o.classList.remove('hidden');
+  showStep('readyStep');
+  const res = mine>theirs? '🏆 勝利！' : mine<theirs? '😢 敗北…' : '🤝 引き分け';
+  document.getElementById('readyTitle').textContent = res;
+  document.getElementById('readyMsg').textContent = `あなた ${mine} - ${theirs} 相手`;
+  document.getElementById('startBtn').textContent = 'もう一度';
+}
+
+// host-only: guest grabbed an item
+function handleGuestPick(id){
+  const m = items.get(id);
+  if (!m) return;
+  if (m.userData.coin){ rivalScore += 10; } // rival(=guest) scored
+  removeItem(id);
+  send({t:'remove', id, by:'self'}); // tell guest to remove (no extra score; guest added locally)
+  broadcastScore();
+}
+function broadcastScore(){
+  if (!isHost) return;
+  send({t:'score', host:myScore, guest:rivalScore});
+}
+
+/* ---------- main loop ---------- */
+const clock = new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), .05);
+
+  if (state==='play'){
+    // ---- local movement (both peers control their own cube) ----
+    let move = 0;
+    if (keys['ArrowLeft']||keys['KeyA']) move -= 1;
+    if (keys['ArrowRight']||keys['KeyD']) move += 1;
+    velX = move*9; me.position.x += velX*dt;
+    const lim = LANE/2 - .6;
+    me.position.x = Math.max(-lim, Math.min(lim, me.position.x));
+    if ((keys['Space']||keys['ArrowUp']||keys['KeyW']) && onGround){ velY=9.2; onGround=false; }
+    velY -= 24*dt; me.position.y += velY*dt;
+    if (me.position.y<=.5){ me.position.y=.5; velY=0; onGround=true; }
+    me.rotation.z = -velX*.05;
+    send({t:'pos', x:+me.position.x.toFixed(2), y:+me.position.y.toFixed(2)});
+
+    // ---- host owns world simulation ----
+    if (isHost){
+      timeLeft -= dt;
+      speed = 14 + (60-timeLeft)*0.4;
+      spawnTimer -= dt;
+      if (spawnTimer<=0){
+        const coin = Math.random()<.6;
+        const x = (Math.random()*(LANE-1.6)) - (LANE-1.6)/2;
+        const id = nextId++;
+        spawnItem(id, coin, x);
+        send({t:'spawn', id, coin, x:+x.toFixed(2)});
+        spawnTimer = .5 + Math.random()*.45;
+      }
+      // move + host collisions
+      for (const [id,m] of items){
+        m.position.z += speed*dt;
+        if (m.userData.coin) m.rotation.z += dt*6;
+        if (hit(m, me)){
+          if (m.userData.coin) myScore += 10;
+          removeItem(id); send({t:'remove', id, by:'self'}); broadcastScore();
+          continue;
+        }
+        if (m.position.z>8){ removeItem(id); send({t:'remove', id, by:'self'}); }
+      }
+      if (timeLeft<=0){
+        send({t:'over', host:myScore, guest:rivalScore});
+        finishMatch(myScore, rivalScore);
+      }
+      updateStats();
+    } else {
+      // ---- guest: move items locally for visuals + detect own pickups ----
+      for (const [id,m] of items){
+        m.position.z += speed*dt;
+        if (m.userData.coin) m.rotation.z += dt*6;
+        if (hit(m, me)){
+          if (m.userData.coin) myScore += 10;     // optimistic local
+          removeItem(id);
+          send({t:'pick', id});                    // tell host
+          updateStats();
+        }
+      }
+      // guest tracks speed from a rough estimate (kept in sync via spawns)
+      speed = 14;
+    }
+  }
+
+  camera.position.x += (me.position.x*.35 - camera.position.x)*.08;
+  camera.lookAt(me.position.x*.3, 1, -6);
+  renderer.render(scene, camera);
+}
+function hit(m, p){
+  return Math.abs(m.position.x-p.position.x)<.9 &&
+         Math.abs(m.position.z-p.position.z)<.9 &&
+         Math.abs(m.position.y-p.position.y)<1.0;
+}
+animate();
+
+/* ---------- UI wiring ---------- */
+function showStep(id){
+  document.querySelectorAll('.step').forEach(s=>s.classList.remove('on'));
+  const el = document.getElementById(id); if (el) el.classList.add('on');
+}
+document.getElementById('beHost').onclick = async ()=>{ showStep('hostStep'); await hostCreate(); };
+document.getElementById('beGuest').onclick = ()=> showStep('guestStep');
+document.getElementById('hostConnect').onclick = hostFinish;
+document.getElementById('guestGen').onclick = async ()=>{
+  const code = document.getElementById('guestOffer').value;
+  if (!code.trim()) return alert('招待コードを貼り付けてください');
+  await guestCreate(code);
+};
+document.getElementById('startBtn').onclick = ()=>{
+  if (!connected) return alert('まだ接続できていません');
+  if (isHost){ send({t:'start', seedTime:Date.now()}); beginMatch(Date.now()); }
+  else alert('スタートはホスト側が押します');
+};
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
